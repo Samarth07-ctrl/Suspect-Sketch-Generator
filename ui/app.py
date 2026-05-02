@@ -29,6 +29,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
+# Set HuggingFace cache directory to D drive to save C drive space
+os.environ["HF_HOME"] = "D:\\AI Suspect Sketch Generator\\hf_cache"
+
 from nlp.nlp_parser import extract_attributes
 from pipeline.prompt_engineer import build_forensic_prompt, STYLE_PRESETS
 from pipeline.generation_pipeline import generate_images, FACE_VALIDATION_AVAILABLE
@@ -71,12 +74,16 @@ def _init_state():
         "prompt":      "",          # last built prompt
         "last_desc":   "",          # description that produced current images
         "generating":  False,
+        "pipe_loaded": False,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
 
 _init_state()
 
+@st.cache_resource
+def get_pipeline():
+    return SuspectSketchPipeline(enable_cpu_offload=False, use_fp16=True)
 
 # ── Sidebar — configuration & status ──────────────────────────────────────
 with st.sidebar:
@@ -104,9 +111,7 @@ with st.sidebar:
         icon = "🟢" if has_key else "🔴"
         st.markdown(f"{icon} **{label}**" + (f"  \n`{note}`" if note else ""))
 
-    _status("HuggingFace FLUX", bool(os.getenv("HF_TOKEN")),   "HF_TOKEN in .env")
-    _status("Together AI",      bool(os.getenv("TOGETHER_API_KEY")), "TOGETHER_API_KEY in .env")
-    _status("Pollinations.ai",  True,  "free, always available")
+    _status("Local SDXL + LCM", True, "Using local GPU")
     _status("Groq / Llama-3",   bool(os.getenv("GROQ_API_KEY")), "GROQ_API_KEY in .env")
 
     if not FACE_VALIDATION_AVAILABLE:
@@ -146,9 +151,124 @@ with tab_generate:
     with col_left:
         st.markdown("#### Suspect description")
 
+<<<<<<< HEAD
         default_desc = st.session_state.pop("fill_desc",
             "White male, approximately 40 years old, square jaw, short brown hair, "
             "bushy eyebrows, scar on left cheek, light stubble, stern expression"
+=======
+    # Quick examples
+    st.markdown("**Quick examples**")
+    EXAMPLES = [
+        "Young Asian woman, early 20s, straight black hair, narrow eyes, round face, slim",
+        "Hispanic male, late 40s, bald, full dark beard, wide nose, tattoo on neck, stocky",
+        "White elderly man, 65+, gray thinning hair, wire glasses, deep wrinkles, gaunt",
+        "Black woman, early 30s, curly natural hair, high cheekbones, oval face, athletic",
+        "Middle Eastern male, mid 30s, black beard, olive skin, hooked nose, average build",
+    ]
+    for ex in EXAMPLES:
+        if st.button(f"↩  {ex[:60]}…", key=ex, use_container_width=True):
+            st.session_state["fill_desc"] = ex
+            st.session_state.images = []
+            st.rerun()
+
+
+# ── Right column: output ───────────────────────────────────────────────────
+with col_right:
+    st.markdown("#### Generated sketches")
+
+    # ── Parse only ────────────────────────────────────────────────────────
+    if parse_only:
+        if not description.strip():
+            st.warning("Enter a description first.")
+        else:
+            with st.spinner("Parsing…"):
+                attrs = extract_attributes(description, use_llm=use_llm)
+                st.session_state.attributes = attrs
+                st.session_state.last_desc  = description
+
+    # ── Full generation ───────────────────────────────────────────────────
+    if generate_clicked:
+        if not description.strip():
+            st.warning("Please enter a suspect description first.")
+        else:
+            with st.spinner("🧠 Parsing description…"):
+                try:
+                    attrs = extract_attributes(description, use_llm=use_llm)
+                    st.session_state.attributes = attrs
+                except Exception as e:
+                    st.error(f"Parsing failed: {e}")
+                    st.stop()
+
+            prompt, _ = build_forensic_prompt(attrs, style=style)
+            st.session_state.prompt = prompt
+
+            with st.spinner(f"🎨 Generating {num_images} image(s) via Local SDXL + LCM... (~few seconds)"):
+                try:
+                    pipe = get_pipeline()
+                    # Ensure the model is loaded
+                    if not pipe.is_loaded:
+                        with st.spinner("⏳ Loading SDXL + LCM model into VRAM... (First run only)"):
+                            pipe.load()
+                            st.session_state.pipe_loaded = True
+                            
+                    imgs = pipe.generate(
+                        prompt=prompt,
+                        num_images=num_images,
+                        seed=st.session_state.seed,
+                        width=1024,
+                        height=1024,
+                        num_inference_steps=6,
+                        guidance_scale=1.5
+                    )
+                    
+                    if val_faces and FACE_VALIDATION_AVAILABLE:
+                        from pipeline.generation_pipeline import _has_face
+                        valid_imgs = []
+                        for i, img in enumerate(imgs):
+                            if _has_face(img):
+                                valid_imgs.append(img)
+                            else:
+                                print(f"  [validate] Image {i+1}: no face detected. Dropped.")
+                        imgs = valid_imgs
+                        
+                    if not imgs:
+                        st.error("Generated images failed face validation. Try a different seed.")
+                    else:
+                        st.session_state.images    = imgs
+                        st.session_state.last_desc = description
+                        st.success(f"✅ Generated {len(imgs)}/{num_images} image(s)  "
+                                   f"(seed `{st.session_state.seed}`)")
+                except Exception as e:
+                    st.error(f"Generation error: {e}")
+
+    # ── Display images ────────────────────────────────────────────────────
+    imgs = st.session_state.get("images", [])
+    if imgs:
+        n_cols = min(len(imgs), 2)
+        img_cols = st.columns(n_cols)
+        desc_slug = (st.session_state.last_desc or "suspect")[:30].replace(" ", "_")
+
+        for i, img in enumerate(imgs):
+            with img_cols[i % n_cols]:
+                st.image(img, caption=f"Variation {i + 1}", use_container_width=True)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                st.download_button(
+                    f"⬇ Download #{i + 1}",
+                    data=buf.getvalue(),
+                    file_name=f"suspect_{desc_slug}_{i+1}.png",
+                    mime="image/png",
+                    key=f"dl_{i}_{st.session_state.seed}",
+                    use_container_width=True,
+                )
+
+    elif not generate_clicked and not parse_only:
+        st.markdown(
+            "<div style='text-align:center;padding:3rem 1rem;color:#94a3b8;font-size:1rem'>"
+            "🎨  Your sketches will appear here."
+            "</div>",
+            unsafe_allow_html=True,
+>>>>>>> upstream/main
         )
 
         description = st.text_area(
@@ -292,3 +412,14 @@ with tab_generate:
         unsafe_allow_html=True,
     )
 
+<<<<<<< HEAD
+=======
+# ── Footer ─────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown(
+    "<div style='text-align:center;color:#94a3b8;font-size:0.75rem'>"
+    "AI Suspect Sketch Generator · Local SDXL + LCM + Groq Llama-3 · "
+    "</div>",
+    unsafe_allow_html=True,
+)
+>>>>>>> upstream/main
